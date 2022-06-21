@@ -1,0 +1,317 @@
+--Book time,Sales QTY,SKUID,SKU Name,Cat 1,Cat 2,Business unit,OrderId,PV,UV,GMV,Average Cost,Sharebuy Price
+SELECT
+	dev.spu_id,
+	dev.sku_id,
+	sku.sku_name,
+	sku.cat1,
+	sku.cat2,
+	sku.cat3,
+	CASE
+		WHEN vbc.best_combo_shop = 1
+		THEN 'Combo Shop'
+		WHEN sku.vender_id = 1
+		THEN 'RBN'
+		WHEN sku.vender_id <> 1
+			AND vba.belongArea = 1
+		THEN 'Local Marketplace'
+		WHEN sku.vender_id <> 1
+			AND vba.belongArea = 2
+		THEN 'Crossborder'
+	END AS business_type,
+	CASE
+		WHEN sku.sku_status_cd = 0
+		THEN 'Off Shelf'
+		WHEN sku.sku_status_cd = 1
+		THEN 'On Shelf'
+		WHEN sku.sku_status_cd = 10
+		THEN 'Deleted'
+	END AS Status_SKU,
+	SUM(adm.PV) PV,
+	SUM(adm.UV) UV,
+	SUM(stok.stock) stock,
+	CASE
+		WHEN acp.avg_cost_price IS NOT NULL
+		THEN acp.avg_cost_price
+		WHEN acp.avg_cost_price IS NULL
+		THEN prc.cost_prc
+		WHEN acp.avg_cost_price = 0
+		THEN prc.cost_prc
+	END AS avg_cost,
+	odet.last_order,
+	odet.count_ord,
+	sbp.sb_price
+FROM
+	(
+		SELECT
+			getdetail.spu_id,
+			getdetail.sku_id,
+			getdetail.sbprc
+		FROM
+			(
+				SELECT
+					id
+				FROM
+					fdm.fdm_epigroupon_activity_config_chain
+				WHERE
+					state = 200
+					AND dp = 'EXPIRED'
+					AND dt = sysdate( - 1)
+				
+				UNION ALL
+				
+				SELECT
+					id
+				FROM
+					fdm.fdm_epigroupon_activity_config_chain
+				WHERE
+					state = 200
+					AND dp = 'ACTIVE'
+			)
+			getid
+		LEFT JOIN
+			(
+				SELECT
+					activity_id,
+					spu_id,
+					sku_id,
+					activity_price sbprc
+				FROM
+					fdm.fdm_epigroupon_activity_detail_config_chain
+				WHERE
+					dp = 'ACTIVE'
+			)
+			getdetail
+		ON
+			getid.id = getdetail.activity_id
+	)
+	dev
+LEFT JOIN
+	(
+		SELECT
+			sku_id,
+			count_ord,
+			last_order
+		FROM
+			(
+				SELECT
+					sku_id,
+					COUNT(DISTINCT ord_id) count_ord,
+					MAX(book_dt) last_order
+				FROM
+					gdm.gdm_ord_ord_det
+				WHERE
+					dt >= '2019-01-01' 
+				GROUP BY
+					sku_id
+			)
+			luv
+		WHERE
+			last_order <= sysdate( - 3)
+	)
+	odet
+ON
+	dev.sku_id = odet.sku_id
+LEFT JOIN
+	(
+		SELECT
+			sku_id,
+			COUNT(DISTINCT browser_uniq_id) AS UV,
+			SUM(pv) AS PV
+		FROM
+			adm.adm_sku_scan_basic_d
+		WHERE
+			dt = sysdate( - 1)
+		GROUP BY
+			sku_id
+	)
+	adm
+ON
+	adm.sku_id = dev.sku_id
+LEFT JOIN
+	(
+		SELECT
+			item_sku_id,
+			sku_name,
+			item_first_cate_name_en cat1,
+			item_second_cate_name_en cat2,
+			item_third_cate_name_en cat3,
+			sku_status_cd,
+			vender_id,
+			shop_name
+		FROM
+			gdm.gdm_m03_glb_item_sku_da
+		WHERE
+			dt = sysdate( - 1)
+	)
+	sku
+ON
+	dev.sku_id = sku.item_sku_id
+LEFT JOIN
+	(
+		SELECT
+			item_sku_id,
+			jd_prc,
+			cost_prc
+		FROM
+			gdm.gdm_m03_glb_item_sku_price_da
+		WHERE
+			dt = sysdate( - 1)
+	)
+	prc
+ON
+	prc.item_sku_id = dev.sku_id
+LEFT OUTER JOIN
+	(
+		SELECT
+			t1.wid AS sku_id,
+			t1.riqi AS Period,
+			t1.chbdj AS avg_cost_price
+		FROM
+			fdm.fdm_fms_stockprice_cw_kcmx_zc t1
+		WHERE
+			dt = sysdate( - 1)
+	)
+	acp
+ON
+	dev.sku_id = acp.sku_id
+LEFT JOIN
+	(
+		SELECT
+			dcc.sku_id AS sku_id,
+			dcc.activity_price AS sb_price,
+			dcc.create_time AS price_createtm,
+			dcc.rownum
+		FROM
+			(
+				SELECT
+					sku_id,
+					create_time,
+					activity_price,
+					ROW_NUMBER() OVER(PARTITION BY sku_id ORDER BY create_time DESC) AS rownum
+				FROM
+					fdm.fdm_epigroupon_activity_detail_config_chain dcc
+				WHERE
+					dp = 'ACTIVE'
+			)
+			dcc
+		WHERE
+			rownum = 1
+	)
+	sbp
+ON
+	sbp.sku_id = dev.sku_id
+LEFT JOIN
+	(
+		SELECT
+			vender_id,
+			value_content best_combo_shop
+		FROM
+			fdm.fdm_popvender_vender_dynamic_subject_chain
+		WHERE
+			dp = 'ACTIVE'
+			AND attribute_key = 'bestComboShop'
+	)
+	vbc
+ON
+	sku.vender_id = vbc.vender_id
+LEFT JOIN
+	(
+		SELECT
+			vender_id,
+			value_content belongArea
+		FROM
+			fdm.fdm_popvender_vender_dynamic_subject_chain
+		WHERE
+			dp = 'ACTIVE'
+			AND attribute_key = 'belongArea'
+	)
+	vba
+ON
+	sku.vender_id = vba.vender_id
+LEFT JOIN
+	(
+		SELECT
+			stk.sku_id,
+			mxd.max_date,
+			stk.dc_id,
+			stk.sid,
+			SUM(stk.num_stock) AS stock
+		FROM
+			(
+				SELECT
+					*
+				FROM
+					fdm.fdm_stock_id_glb_core_stocknum_chain
+				WHERE
+					dp = 'ACTIVE'
+					AND num_stock > 0
+					AND sid IN(1, 2, 3, 4, 5, 6)
+					AND dc_id IN(100, 101, 102, 103, 104, 105, 106, 200)
+			)
+			stk
+		INNER JOIN
+			(
+				SELECT
+					sku_id,
+					dc_id,
+					MAX(start_date) AS max_date
+				FROM
+					fdm.fdm_stock_id_glb_core_stocknum_chain
+				WHERE
+					dp = 'ACTIVE'
+					AND sid IN(1, 2, 3, 4, 5, 6)
+					AND dc_id IN(100, 101, 102, 103, 104, 105, 106, 200)
+				GROUP BY
+					sku_id,
+					dc_id
+			)
+			mxd
+		ON
+			stk.sku_id = mxd.sku_id
+			AND stk.dc_id = mxd.dc_id
+			AND stk.start_date = mxd.max_date
+		GROUP BY
+			stk.sku_id,
+			mxd.max_date,
+			stk.dc_id,
+			stk.sid
+	)
+	stok ON stok.sku_id = dev.sku_id
+GROUP BY
+	dev.spu_id,
+	dev.sku_id,
+	sku.sku_name,
+	sku.cat1,
+	sku.cat2,
+	sku.cat3,
+	CASE
+		WHEN vbc.best_combo_shop = 1
+		THEN 'Combo Shop'
+		WHEN sku.vender_id = 1
+		THEN 'RBN'
+		WHEN sku.vender_id <> 1
+			AND vba.belongArea = 1
+		THEN 'Local Marketplace'
+		WHEN sku.vender_id <> 1
+			AND vba.belongArea = 2
+		THEN 'Crossborder'
+	END,
+	CASE
+		WHEN sku.sku_status_cd = 0
+		THEN 'Off Shelf'
+		WHEN sku.sku_status_cd = 1
+		THEN 'On Shelf'
+		WHEN sku.sku_status_cd = 10
+		THEN 'Deleted'
+	END,
+	CASE
+		WHEN acp.avg_cost_price IS NOT NULL
+		THEN acp.avg_cost_price
+		WHEN acp.avg_cost_price IS NULL
+		THEN prc.cost_prc
+		WHEN acp.avg_cost_price = 0
+		THEN prc.cost_prc
+	END,
+	sbp.sb_price,
+	odet.last_order,
+	odet.count_ord
